@@ -3,6 +3,8 @@
 package stream
 
 import (
+	"fmt"
+	"math/rand"
 	"testing"
 )
 
@@ -25,38 +27,37 @@ func TestCountMinSketch_EstimateMonotone(t *testing.T) {
 	}
 }
 
-// func BenchmarkBloom_Negative(b *testing.B) {
-// 	f := New(10000, 5)
-// 	key := []byte("missing_key")
+func TestCountMinSketch_Accuracy(t *testing.T) {
+	cms := NewCMSWithEstimates(0.01, 0.01)
 
-// 	b.ResetTimer()
-// 	for i := 0; i < b.N; i++ {
-// 		_, _ = f.MayContain(key)
-// 	}
-// }
+	zipf := rand.NewZipf(rand.New(rand.NewSource(1)), 1.1, 1, 1000)
+	freqs := make(map[string]int)
+	total := 100000
 
-// func TestBloom_FalsePositiveRate(t *testing.T) {
-// 	n := 1000
-// 	fpTarget := 0.05
-// 	f := NewWithEstimates(uint64(n), fpTarget)
+	for i := 0; i < total; i++ {
+		k := fmt.Sprintf("k-%d", zipf.Uint64())
+		freqs[k]++
+		cms.Add([]byte(k))
+	}
 
-// 	for i := 0; i < n; i++ {
-// 		f.Add([]byte(fmt.Sprintf("%d", i)))
-// 	}
+	for k, realCount := range freqs {
+		if realCount > total/100 {
+			est, _ := cms.Estimate([]byte(k))
+			errRate := float64(est-uint64(realCount)) / float64(total)
 
-// 	fpCount := 0
-// 	checkCount := 10000
-// 	for i := 0; i < checkCount; i++ {
-// 		ok, _ := f.MayContain([]byte(fmt.Sprintf("missing_%d", i)))
-// 		if ok {
-// 			fpCount++
-// 		}
-// 	}
+			if errRate > 0.02 {
+				t.Errorf("Key %s: Real %d, Est %d, ErrorRate %.4f", k, realCount, est, errRate)
+			}
+		}
+	}
+}
 
-// 	rate := float64(fpCount) / float64(checkCount)
-// 	t.Logf("Target FP: %.4f, Actual: %.4f", fpTarget, rate)
+func BenchmarkCMS_Add(b *testing.B) {
+	cms := NewCountMinSketch(2000, 5)
+	key := []byte("bench_key")
 
-// 	if rate > fpTarget*2 {
-// 		t.Errorf("FP rate too high")
-// 	}
-// }
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cms.Add(key)
+	}
+}

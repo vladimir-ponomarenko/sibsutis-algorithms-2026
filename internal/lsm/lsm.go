@@ -116,6 +116,7 @@ func (e *Engine) Get(key []byte) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Memtable
 	v, err := e.mem.Get(key)
 	if err == nil {
 		if v == nil {
@@ -124,7 +125,10 @@ func (e *Engine) Get(key []byte) ([]byte, error) {
 		return v, nil
 	}
 
+	// Sstables
 	for _, sst := range e.ssts {
+		// canExist, err := sst.reader.MayContain(key)
+
 		it, err := sst.reader.Iterator(key, nil)
 		if err != nil {
 			continue

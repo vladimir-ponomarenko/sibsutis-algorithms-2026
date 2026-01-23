@@ -1,8 +1,10 @@
 package bloom
 
 import (
+	"encoding/binary"
 	"errors"
 	"hash/fnv"
+	"io"
 	"math"
 )
 
@@ -71,4 +73,50 @@ func doubleHash(key []byte) (uint64, uint64) {
 	sum2 := (sum1 >> 32) | (sum1 << 32)
 
 	return sum1, sum2
+}
+
+func (f *Filter) WriteTo(w io.Writer) (int64, error) {
+	var written int64
+
+	if err := binary.Write(w, binary.BigEndian, f.m); err != nil {
+		return written, err
+	}
+	written += 8
+
+	if err := binary.Write(w, binary.BigEndian, f.k); err != nil {
+		return written, err
+	}
+	written += 1
+
+	if err := binary.Write(w, binary.BigEndian, f.bitset); err != nil {
+		return written, err
+	}
+	written += int64(len(f.bitset) * 8)
+
+	return written, nil
+}
+
+func Decode(data []byte) (*Filter, error) {
+	if len(data) < 9 {
+		return nil, errors.New("bloom: data is too short")
+	}
+	m := binary.BigEndian.Uint64(data[0:8])
+	k := data[8]
+
+	bitaetBytes := data[9:]
+	words := (m + 63) / 64
+	if uint64(len(bitaetBytes)) < words*8 {
+		return nil, errors.New("bloom: bitset data corrupted")
+	}
+
+	bitset := make([]uint64, words)
+	for i := 0; i < int(words); i++ {
+		bitset[i] = binary.BigEndian.Uint64(bitaetBytes[i*8 : (i+1)*8])
+	}
+
+	return &Filter{
+		bitset: bitset,
+		m:      m,
+		k:      k,
+	}, nil
 }

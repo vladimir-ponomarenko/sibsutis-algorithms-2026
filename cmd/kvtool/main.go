@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"kvschool/internal/kv/lsmstore"
 	"kvschool/internal/kv/memmap"
 	"kvschool/internal/mapreduce"
+	"kvschool/internal/stream"
 	"kvschool/internal/testutil"
 )
 
@@ -113,6 +115,7 @@ func runLoad(args []string) error {
 	zipf := fs.Float64("zipf", 0, "параметр s для Zipf (0 для равномерного, >1.0 для перекошенного)")
 	storeKind := fs.String("store", "memmap", "тип хранилища: memmap|skiplist|lsm")
 	dbDir := fs.String("dir", "", "директория для LSM DB (по умолчанию временная)")
+	report := fs.Bool("report", false, "show top talkers report")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -134,24 +137,55 @@ func runLoad(args []string) error {
 		fmt.Printf("Нагрузка: Равномерная (Uniform)\n")
 	}
 
+	var cms *stream.CountMinSketch
+	groundTruth := make(map[string]int)
+	if *report {
+		cms = stream.NewCountMinSketch(2000, 5)
+	}
+
 	start := time.Now()
 	ctx := context.Background()
 
 	// Simple Mixed Workload: 50% Put, 50% Get
 	for i := 0; i < *count; i++ {
 		key := keyGen.Next()
-		if i%2 == 0 {
-			if err := st.Put(ctx, key, []byte("data")); err != nil {
-				return fmt.Errorf("ошибка put: %w", err)
-			}
-		} else {
-			_, _ = st.Get(ctx, key)
+		if err := st.Put(ctx, key, []byte("val")); err != nil {
+			return err
+		}
+
+		if *report {
+			cms.Add(key)
+			groundTruth[string(key)]++
 		}
 	}
+	fmt.Printf("Done %d ops in %v\n", *count, time.Since(start))
 
-	dur := time.Since(start)
-	fmt.Printf("Выполнено %d операций за %v (%.1f op/s)\n", *count, dur, float64(*count)/dur.Seconds())
+	if *report {
+		printReport(cms, groundTruth)
+	}
 	return nil
+}
+
+func printReport(cms *stream.CountMinSketch, truth map[string]int) {
+	fmt.Println("\n=== Top Talkers (CMS vs Real) ===")
+	type pair struct {
+		k    string
+		real int
+		est  uint64
+	}
+	var data []pair
+	for k, v := range truth {
+		est, _ := cms.Estimate([]byte(k))
+		data = append(data, pair{k, v, est})
+	}
+	sort.Slice(data, func(i, j int) bool { return data[i].real > data[j].real })
+
+	fmt.Printf("%-20s | %-6s | %-6s | %s\n", "Key", "Real", "Est", "Error")
+	for i := 0; i < 10 && i < len(data); i++ {
+		d := data[i]
+		errP := float64(d.est-uint64(d.real)) / float64(d.real) * 100
+		fmt.Printf("%-20s | %-6d | %-6d | +%.1f%%\n", d.k, d.real, d.est, errP)
+	}
 }
 
 func runCdrBench(args []string) error {

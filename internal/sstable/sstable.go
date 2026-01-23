@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"kvschool/internal/bloom"
 )
 
 // ErrNotImplemented используется в заготовке практики второго дня.
@@ -27,18 +28,26 @@ type Writer struct {
 	index       []indexEntry
 	indexStep   int
 	lastIndexAt int64
+	bloom       *bloom.Filter
 }
 
 func NewWriter(w io.Writer) *Writer {
+	bf := bloom.NewWithEstimates(10000, 0.1)
+
 	return &Writer{
 		w:         bufio.NewWriter(w),
 		f:         w,
 		indexStep: 1024,
+		bloom:     bf,
 	}
 }
 
 // Add добавляет пару. Ключи должны быть строго возрастающими.
 func (w *Writer) Add(key, value []byte) error {
+	if err := w.bloom.Add(key); err != nil {
+		return err
+	}
+
 	if w.offset == 0 || (w.offset-w.lastIndexAt) > int64(w.indexStep) {
 		w.index = append(w.index, indexEntry{
 			Key:    append([]byte(nil), key...),
@@ -101,7 +110,23 @@ func (w *Writer) Close() error {
 		}
 	}
 
+	indexSize := 4
+	for _, entry := range w.index {
+		indexSize += 4 + len(entry.Key) + 8
+	}
+	bloomOffset := indexOffset + int64(indexSize)
+
+	_, err := w.bloom.WriteTo(w.w)
+	if err != nil {
+		return err
+	}
+
 	binary.BigEndian.PutUint64(buf[:], uint64(indexOffset))
+	if _, err := w.w.Write(buf[:]); err != nil {
+		return err
+	}
+
+	binary.BigEndian.PutUint64(buf[:], uint64(bloomOffset))
 	if _, err := w.w.Write(buf[:]); err != nil {
 		return err
 	}
