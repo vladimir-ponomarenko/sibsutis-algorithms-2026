@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"kvschool/internal/kv"
+	"kvschool/internal/kv/lsmstore"
 	"kvschool/internal/kv/memmap"
 	"kvschool/internal/mapreduce"
 	"kvschool/internal/testutil"
@@ -33,6 +37,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "ошибка:", err)
 			os.Exit(1)
 		}
+	case "bench":
+		if err := runCdrBench(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "ошибка:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -43,14 +52,14 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "kvtool <команда> [аргументы]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Команды:")
-	fmt.Fprintln(os.Stderr, "  wordcount  -in <файл> [-store memmap|skiplist]   выполнить map/reduce wordcount")
+	fmt.Fprintln(os.Stderr, "  wordcount  -in <файл> [-store memmap|skiplist|lsm]   выполнить map/reduce wordcount")
 	fmt.Fprintln(os.Stderr, "  load       -count <N> [-zipf <S>] [-store ...]   запустить нагрузочное тестирование")
 }
 
 func runWordCount(args []string) error {
 	fs := flag.NewFlagSet("wordcount", flag.ContinueOnError)
 	inPath := fs.String("in", "", "входной текстовый файл")
-	storeKind := fs.String("store", "memmap", "тип хранилища: memmap|skiplist")
+	storeKind := fs.String("store", "memmap", "тип хранилища: memmap|skiplist|lsm")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -63,7 +72,7 @@ func runWordCount(args []string) error {
 	}
 
 	ctx := context.Background()
-	st, err := initStore(*storeKind)
+	st, err := initStore(*storeKind, "")
 	if err != nil {
 		return err
 	}
@@ -103,11 +112,12 @@ func runLoad(args []string) error {
 	count := fs.Int("count", 10000, "количество операций")
 	zipf := fs.Float64("zipf", 0, "параметр s для Zipf (0 для равномерного, >1.0 для перекошенного)")
 	storeKind := fs.String("store", "memmap", "тип хранилища: memmap|skiplist|lsm")
+	dbDir := fs.String("dir", "", "директория для LSM DB (по умолчанию временная)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	st, err := initStore(*storeKind)
+	st, err := initStore(*storeKind, *dbDir)
 	if err != nil {
 		return err
 	}
@@ -144,13 +154,80 @@ func runLoad(args []string) error {
 	return nil
 }
 
-func initStore(kind string) (kv.Store, error) {
+func runCdrBench(args []string) error {
+	fs := flag.NewFlagSet("cdr-bench", flag.ContinueOnError)
+	inPath := fs.String("in", "", "входной CSV файл")
+	storeKind := fs.String("store", "lsm", "тип хранилища (lsm рекомендуется)")
+	dbDir := fs.String("dir", "", "директория для LSM DB (по умолчанию временная)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *inPath == "" {
+		return fmt.Errorf("отсутствует параметр -in")
+	}
+
+	st, err := initStore(*storeKind, *dbDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	f, err := os.Open(*inPath)
+	if err != nil {
+		return fmt.Errorf("ошибка открытия CSV: %w", err)
+	}
+	defer f.Close()
+
+	csvReader := csv.NewReader(f)
+	ctx := context.Background()
+	count := 0
+	start := time.Now()
+
+	if _, err := csvReader.Read(); err != nil {
+		return err
+	}
+
+	fmt.Printf("Начало загрузки CDR из %s в %s...\n", *inPath, *storeKind)
+
+	for {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		key := []byte(record[0] + "_" + record[1])
+		value := []byte(strings.Join(record[2:], ","))
+
+		if err := st.Put(ctx, key, value); err != nil {
+			return fmt.Errorf("ошибка Put CDR: %w", err)
+		}
+		count++
+	}
+
+	dur := time.Since(start)
+	fmt.Printf("Загружено %d записей за %v (%.1f rec/s)\n", count, dur, float64(count)/dur.Seconds())
+	return nil
+}
+
+func initStore(kind, dir string) (kv.Store, error) {
 	switch kind {
 	case "memmap":
 		return memmap.New(), nil
 	case "skiplist":
 		return memSkipListDefault(), nil
-	// case "lsm": будет добавлен в процессе выполнения заданий
+	case "lsm":
+		if dir == "" {
+			tmpDir, err := os.MkdirTemp("", "kvtool-lsm-")
+			if err != nil {
+				return nil, err
+			}
+			dir = tmpDir
+		}
+		fmt.Printf("Используется LSM-хранилище в директории: %s\n", dir)
+		return lsmstore.Open(lsmstore.Options{Dir: dir})
 	default:
 		return nil, fmt.Errorf("неизвестное хранилище %q", kind)
 	}
